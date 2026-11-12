@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: http://127.0.0.1:*; media-src http://127.0.0.1:* blob:; connect-src 'self'">
+  <title>onlyTorrent</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></symbol>
+    <symbol id="i-resume" viewBox="0 0 24 24"><path d="M12 4v10m0 0l-4-4m4 4l4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.8" fill="currentColor"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="19" cy="12" r="1.8" fill="currentColor"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M19.4 13.5l1.6 1.2-2 3.4-1.9-.7a7.6 7.6 0 01-1.9 1.1L15 20.5h-4l-.3-2a7.6 7.6 0 01-1.900-1.1l-1.9.7-2-3.4 1.6-1.2a7.4 7.4 0 010-2.2L4.9 10l2-3.4 1.9.7a7.6 7.6 0 011.9-1.1L11 4.2h4l.3 2a7.6 7.6 0 011.9 1.1l1.9-.7 2 3.4-1.6 1.2a7.4 7.4 0 010 2.3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z M14 3v5h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V6l11-2v12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="6.5" cy="18" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="17.5" cy="16" r="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4l4 4M5 14v4a2 2 0 002 2h10a2 2 0 002-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M15.5 9a4 4 0 010 6M18 6.5a7.5 7.5 0 010 11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z" fill="currentColor"/><path d="M16 9.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-full" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-pip" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor"/></symbol>
+    <symbol id="i-cc" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M10.5 10.2a2.3 2.3 0 100 3.6M17 10.2a2.3 2.3 0 100 3.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="i-cast" viewBox="0 0 24 24"><path d="M3 9V7a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2h-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M3 13a6 6 0 016 6M3 16.5a2.5 2.5 0 012.5 2.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="3.3" cy="19" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="4" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13" y="13" width="7" height="7" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-rows" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="14" width="16" height="5" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M6 12h12M12 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6z" fill="currentColor"/><path d="M17 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6l-9 6 9 6z" fill="currentColor"/><path d="M7 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </svg>
+
+  <div id="library" class="view">
+    <header class="topbar">
+      <div class="brand"><canvas class="brand-mark" width="40" height="40" aria-hidden="true"></canvas>onlyTorrent</div>
+      <form id="addForm" class="add-form" autocomplete="off">
+        <input id="magnetInput" type="text" spellcheck="false"
+               placeholder="Paste a magnet link, info hash or .torrent URL"
+               aria-label="Magnet link, info hash or torrent URL">
+        <button type="submit" class="btn btn-primary">Add</button>
+      </form>
+      <div class="topbar-actions">
+        <button id="openTorrentBtn" class="btn btn-ghost" title="Open a .torrent file (⌘O)">
+          <svg class="ic"><use href="#i-file"/></svg><span>Open file</span>
+        </button>
+        <button id="shareBtn" class="btn btn-ghost" title="Share files as a new torrent (⌘N)">
+          <svg class="ic"><use href="#i-share"/></svg><span>Share</span>
+        </button>
+        <button id="prefsBtn" class="btn btn-icon" title="Preferences" aria-label="Preferences">
+          <svg class="ic"><use href="#i-gear"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="toolbar" id="toolbar" hidden>
+      <div class="summary" id="summary" aria-live="polite"></div>
+      <div class="segmented" role="radiogroup" aria-label="Layout">
+        <button role="radio" class="seg" data-view="grid" title="Posters" aria-label="Posters"><svg class="ic"><use href="#i-grid"/></svg></button>
+        <button role="radio" class="seg" data-view="list" title="List" aria-label="List"><svg class="ic"><use href="#i-rows"/></svg></button>
+      </div>
+      <label class="search">
+        <svg class="ic"><use href="#i-search"/></svg>
+        <input id="searchInput" type="search" placeholder="Find" aria-label="Find torrent" spellcheck="false">
+      </label>
+      <select id="sortSelect" class="select" aria-label="Sort torrents">
+        <option value="added">Newest first</option>
+        <option value="name">Name</option>
+        <option value="progress">Progress</option>
+        <option value="size">Size</option>
+        <option value="status">Status</option>
+      </select>
+    </div>
+
+    <main id="torrentGrid" class="torrent-grid" hidden></main>
+    <main id="torrentList" class="torrent-list" hidden></main>
+    <p id="noMatches" class="no-matches" hidden></p>
+
+    <section id="emptyState" class="empty" hidden>
+      <div class="empty-strip" aria-hidden="true"></div>
+      <h1>Paste a magnet link to start watching.</h1>
+      <p>Videos play while they download, and you can skip to any point. Pieces you jump to are fetched first.</p>
+      <p class="empty-hint">You can also drop <b>.torrent</b> files anywhere in this window, or press <kbd>⌘V</kbd> to add a magnet link from your clipboard.</p>
+    </section>
+  </div>
+
+  <section id="player" class="view player" hidden aria-label="Player">
+    <video id="video" preload="auto" playsinline crossorigin="anonymous"></video>
+    <div id="audioCard" class="audio-card" hidden>
+      <img id="audioArt" class="audio-art" alt="" hidden>
+      <div>
+        <div class="audio-title" id="audioTitle"></div>
+        <div class="audio-sub" id="audioSub"></div>
+      </div>
+    </div>
+    <div id="castOverlay" class="cast-overlay" hidden>
+      <svg class="ic"><use href="#i-cast"/></svg>
+      <div id="castOverlayText"></div>
+      <button id="castStopBtn" class="btn btn-ghost">Stop casting</button>
+    </div>
+
+    <div id="playerStatus" class="player-status" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <div id="playerStatusText">Finding peers…</div>
+    </div>
+    <div id="playerError" class="player-error" hidden>
+      <p id="playerErrorText"></p>
+      <button id="errorExternalBtn" class="btn btn-primary">Open in external player</button>
+    </div>
+
+    <div class="player-top chrome">
+      <button id="backBtn" class="btn btn-icon" title="Back to list (Esc)" aria-label="Back to list">
+        <svg class="ic"><use href="#i-back"/></svg>
+      </button>
+      <div class="player-title">
+        <div id="playerTitle"></div>
+        <div id="playerStats" class="player-stats"></div>
+      </div>
+      <button id="playlistBtn" class="btn btn-icon" title="Playlist" aria-label="Playlist">
+        <svg class="ic"><use href="#i-list"/></svg>
+      </button>
+    </div>
+
+    <aside id="playlist" class="playlist" hidden>
+      <h2>In this torrent</h2>
+      <ol id="playlistItems"></ol>
+    </aside>
+
+    <div class="player-bottom chrome">
+      <div id="seek" class="seek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0">
+        <canvas id="seekCanvas"></canvas>
+        <div id="seekTip" class="seek-tip" hidden></div>
+      </div>
+      <div class="controls">
+        <button id="prevBtn" class="btn btn-icon" title="Previous (P)" aria-label="Previous file"><svg class="ic"><use href="#i-prev"/></svg></button>
+        <button id="playBtn" class="btn btn-icon btn-play" title="Play / pause (Space)" aria-label="Play">
+          <svg class="ic"><use href="#i-play"/></svg>
+        </button>
+        <button id="nextBtn" class="btn btn-icon" title="Next (N)" aria-label="Next file"><svg class="ic"><use href="#i-next"/></svg></button>
+        <div class="volume">
+          <button id="muteBtn" class="btn btn-icon" title="Mute (M)" aria-label="Mute"><svg class="ic"><use href="#i-volume"/></svg></button>
+          <input id="volumeRange" type="range" min="0" max="1" step="0.02" value="1" aria-label="Volume">
+        </div>
+        <div id="timeLabel" class="time">0:00 / 0:00</div>
+        <div class="spacer"></div>
+        <div class="menu-wrap">
+          <button id="speedBtn" class="btn btn-ghost btn-small" title="Playback speed" aria-haspopup="menu">1×</button>
+          <div id="speedMenu" class="menu menu-up" role="menu" hidden></div>
+        </div>
+        <div class="menu-wrap">
+          <button id="ccBtn" class="btn btn-icon" title="Subtitles (C)" aria-label="Subtitles" aria-haspopup="menu"><svg class="ic"><use href="#i-cc"/></svg></button>
+          <div id="ccMenu" class="menu menu-up cc-panel" role="dialog" aria-label="Subtitles" hidden></div>
+        </div>
+        <div class="menu-wrap">
+          <button id="castBtn" class="btn btn-icon" title="Play on a TV or speaker" aria-label="Cast" aria-haspopup="menu"><svg class="ic"><use href="#i-cast"/></svg></button>
+          <div id="castMenu" class="menu menu-up" role="menu" hidden></div>
+        </div>
+        <button id="externalBtn" class="btn btn-icon" title="Open in external player" aria-label="Open in external player"><svg class="ic"><use href="#i-external"/></svg></button>
+        <button id="pipBtn" class="btn btn-icon" title="Picture in picture" aria-label="Picture in picture"><svg class="ic"><use href="#i-pip"/></svg></button>
+        <button id="fullBtn" class="btn btn-icon" title="Full screen (F)" aria-label="Full screen"><svg class="ic"><use href="#i-full"/></svg></button>
+      </div>
+    </div>
+  </section>
+
+  <div id="dropOverlay" class="drop-overlay" hidden>
+    <div>Drop .torrent files to add them, or other files to share them</div>
+  </div>
+
+  <dialog id="prefsDialog" class="dialog dialog-wide" autofocus tabindex="-1">
+    <form method="dialog">
+      <h2>Preferences</h2>
+
+      <h3>Downloads</h3>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">Save downloads to</div>
+          <div id="prefPath" class="pref-value"></div>
+        </div>
+        <button type="button" id="prefPathBtn" class="btn btn-ghost">Change…</button>
+      </div>
+      <div class="pref-row">
+        <label class="pref-label" for="prefDownLimit">Download speed limit</label>
+        <span class="unit-input"><input type="number" id="prefDownLimit" min="0" step="50" placeholder="No limit"><span>KB/s</span></span>
+      </div>
+      <div class="pref-row">
+        <label class="pref-label" for="prefUpLimit">Upload speed limit</label>
+        <span class="unit-input"><input type="number" id="prefUpLimit" min="0" step="10" placeholder="No limit"><span>KB/s</span></span>
+      </div>
+      <div class="pref-row">
+        <div>
+          <label class="pref-label" for="prefRatio">Stop seeding at share ratio</label>
+          <div class="pref-value">Leave empty to keep seeding until you pause or remove the torrent.</div>
+        </div>
+        <span class="unit-input"><input type="number" id="prefRatio" min="0" step="0.5" placeholder="Never"></span>
+      </div>
+
+      <h3>Playback</h3>
+      <label class="pref-row pref-toggle">
+        <span class="pref-label">Play the first video when a torrent is added</span>
+        <input type="checkbox" id="prefAutoPlay">
+      </label>
+      <div class="pref-row">
+        <div>
+          <label class="pref-label" for="prefPlayer">Play videos in</label>
+          <div id="prefPlayerPath" class="pref-value"></div>
+        </div>
+        <select id="prefPlayer" class="select">
+          <option value="builtin">onlyTorrent</option>
+          <option value="vlc">VLC</option>
+          <option value="custom">Another app…</option>
+        </select>
+      </div>
+
+      <h3>System</h3>
+      <div class="pref-row">
+        <label class="pref-label" for="prefTheme">Appearance</label>
+        <select id="prefTheme" class="select">
+          <option value="system">Match system</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+      </div>
+      <label class="pref-row pref-toggle">
+        <span class="pref-label">Notify me when a download finishes</span>
+        <input type="checkbox" id="prefNotify">
+      </label>
+      <label class="pref-row pref-toggle">
+        <span class="pref-label">Open onlyTorrent when I log in</span>
+        <input type="checkbox" id="prefLogin">
+      </label>
+      <label class="pref-row pref-toggle" id="prefTrayRow">
+        <span class="pref-label">Keep running in the tray when the window is closed</span>
+        <input type="checkbox" id="prefTray">
+      </label>
+      <div class="pref-row">
+        <div>
+          <div class="pref-label">Open magnet links from the browser in onlyTorrent</div>
+          <div id="prefHandlerState" class="pref-value"></div>
+        </div>
+        <button type="button" id="prefHandlerBtn" class="btn btn-ghost">Make default</button>
+      </div>
+      <h3>Online subtitles</h3>
+      <p class="pref-note">Search uses your own free <a href="#" id="osLink">OpenSubtitles.com</a> account. Create an API key under Profile, then API consumers. Downloads also need your username and password, which are stored encrypted in your system keychain.</p>
+      <div class="pref-row">
+        <label class="pref-label" for="prefOsKey">API key</label>
+        <input id="prefOsKey" class="text-input" type="text" spellcheck="false" autocomplete="off" placeholder="Not set">
+      </div>
+      <div class="pref-row">
+        <label class="pref-label" for="prefOsUser">Username</label>
+        <input id="prefOsUser" class="text-input" type="text" spellcheck="false" autocomplete="off" placeholder="Not set">
+      </div>
+      <div class="pref-row">
+        <label class="pref-label" for="prefOsPass">Password</label>
+        <input id="prefOsPass" class="text-input" type="password" autocomplete="off" placeholder="Not set">
+      </div>
+      <p id="prefAbout" class="pref-about"></p>
+      <div class="dialog-actions">
+        <button class="btn btn-primary" value="close">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="shareDialog" class="dialog" autofocus tabindex="-1">
+    <form method="dialog" id="shareForm">
+      <h2>Share files as a torrent</h2>
+      <p class="dialog-body">onlyTorrent seeds straight from where the files are, so keep them in place while you share.</p>
+      <div class="share-pick">
+        <button type="button" class="btn btn-ghost" data-pick="file">Choose a file…</button>
+        <button type="button" class="btn btn-ghost" data-pick="folder">Choose a folder…</button>
+      </div>
+      <div id="sharePath" class="share-path">Nothing chosen yet.</div>
+      <details class="advanced">
+        <summary>Advanced options</summary>
+        <label class="field">
+          <span class="pref-label">Trackers, one per line</span>
+          <textarea id="shareTrackers" rows="5" spellcheck="false"></textarea>
+        </label>
+        <label class="field">
+          <span class="pref-label">Comment</span>
+          <input id="shareComment" type="text" placeholder="Optional">
+        </label>
+        <label class="pref-row pref-toggle">
+          <span>
+            <span class="pref-label">Private torrent</span>
+            <span class="pref-value">Only the trackers above can find peers. DHT and peer exchange are off.</span>
+          </span>
+          <input type="checkbox" id="sharePrivate">
+        </label>
+      </details>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel" formnovalidate>Cancel</button>
+        <button class="btn btn-primary" value="create" id="shareCreateBtn" disabled>Create torrent</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="filesDialog" class="dialog dialog-wide" autofocus tabindex="-1">
+    <form method="dialog">
+      <h2 id="filesTitle">Files</h2>
+      <p class="dialog-body">Untick files you don’t want. They won’t be downloaded.</p>
+      <ul id="filesDialogList" class="files files-dialog"></ul>
+      <div class="dialog-actions">
+        <button class="btn btn-primary" value="close">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="subSearchDialog" class="dialog dialog-wide" autofocus tabindex="-1">
+    <form method="dialog" id="subSearchForm">
+      <h2>Find subtitles online</h2>
+      <div class="search-row">
+        <label class="field field-grow">
+          <span class="pref-label">Languages</span>
+          <input id="subSearchLangs" type="text" placeholder="ar, en" spellcheck="false">
+        </label>
+        <button type="button" id="subSearchGo" class="btn btn-primary">Search</button>
+      </div>
+      <p id="subSearchStatus" class="sub-search-status"></p>
+      <ul id="subSearchResults" class="sub-results"></ul>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="removeDialog" class="dialog" autofocus tabindex="-1">
+    <form method="dialog">
+      <h2 id="removeTitle">Remove torrent?</h2>
+      <p class="dialog-body">Removing it stops downloading and seeding. You can keep the files you already downloaded, or delete them too.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" value="cancel">Cancel</button>
+        <button class="btn btn-ghost btn-danger" value="delete">Remove and delete files</button>
+        <button class="btn btn-primary" value="keep">Remove, keep files</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="rowMenu" class="menu row-menu" role="menu" hidden>
+    <button role="menuitem" data-act="files">Choose files…</button>
+    <button role="menuitem" data-act="folder">Show in folder</button>
+    <button role="menuitem" data-act="magnet">Copy magnet link</button>
+    <button role="menuitem" data-act="save">Save .torrent file…</button>
+    <hr>
+    <button role="menuitem" data-act="remove" class="danger">Remove…</button>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

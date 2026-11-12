@@ -1,0 +1,98 @@
+{
+  "name": "onlytorrent",
+  "version": "0.1.0",
+  "description": "Stream torrent videos from magnet links with seeking while downloading",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/*.test.js\"",
+    "pack": "electron-builder --dir",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "airplayer": "^2.0.0",
+    "chardet": "^2.2.0",
+    "chromecasts": "^1.10.2",
+    "dlnacasts": "^0.1.0",
+    "electron-updater": "^6.8.11",
+    "iconv-lite": "^0.7.3",
+    "matroska-subtitles": "^3.3.2",
+    "music-metadata": "^12.4.0",
+    "parse-torrent": "^11.0.24",
+    "webrtc-polyfill": "^1.2.2",
+    "webtorrent": "^3.0.21"
+  },
+  "devDependencies": {
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0"
+  },
+  "productName": "onlyTorrent",
+  "build": {
+    "appId": "app.onlytorrent.desktop",
+    "productName": "onlyTorrent",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "lib/**",
+      "renderer/**",
+      "build/icon.png",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "protocols": [
+      {
+        "name": "Magnet link",
+        "schemes": [
+          "magnet"
+        ]
+      }
+    ],
+    "fileAssociations": [
+      {
+        "ext": "torrent",
+        "name": "BitTorrent file",
+        "role": "Viewer",
+        "mimeType": "application/x-bittorrent"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "AudioVideo;Network",
+      "mimeTypes": [
+        "x-scheme-handler/magnet",
+        "application/x-bittorrent"
+      ]
+    },
+    "npmRebuild": false
+  }
+}

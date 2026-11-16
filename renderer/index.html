@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: http://127.0.0.1:*; media-src http://127.0.0.1:* blob:; connect-src 'self'">
-  <title>onlyTorrent</title>
+        content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data: http://127.0.0.1:* https://archive.org https://*.archive.org; media-src http://127.0.0.1:* blob:; connect-src 'self'">
+  <title>Magnetic</title>
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -33,12 +33,13 @@
     <symbol id="i-next" viewBox="0 0 24 24"><path d="M6 6l9 6-9 6z" fill="currentColor"/><path d="M17 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-prev" viewBox="0 0 24 24"><path d="M18 6l-9 6 9 6z" fill="currentColor"/><path d="M7 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 7h12M8 12h12M8 17h12M4 7h.01M4 12h.01M4 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.2 8.8l-1.9 4.5-4.5 1.9 1.9-4.5z" fill="currentColor" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 01-2 2H6a2 2 0 01-2-2V8a2 2 0 012-2h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </svg>
 
   <div id="library" class="view">
     <header class="topbar">
-      <div class="brand"><canvas class="brand-mark" width="40" height="40" aria-hidden="true"></canvas>onlyTorrent</div>
+      <div class="brand"><canvas class="brand-mark" width="40" height="40" aria-hidden="true"></canvas>Magnetic</div>
       <form id="addForm" class="add-form" autocomplete="off">
         <input id="magnetInput" type="text" spellcheck="false"
                placeholder="Paste a magnet link, info hash or .torrent URL"
@@ -46,6 +47,9 @@
         <button type="submit" class="btn btn-primary">Add</button>
       </form>
       <div class="topbar-actions">
+        <button id="discoverBtn" class="btn btn-ghost" title="Find free films and music">
+          <svg class="ic"><use href="#i-compass"/></svg><span>Discover</span>
+        </button>
         <button id="openTorrentBtn" class="btn btn-ghost" title="Open a .torrent file (⌘O)">
           <svg class="ic"><use href="#i-file"/></svg><span>Open file</span>
         </button>
@@ -77,15 +81,23 @@
       </select>
     </div>
 
-    <main id="torrentGrid" class="torrent-grid" hidden></main>
-    <main id="torrentList" class="torrent-list" hidden></main>
-    <p id="noMatches" class="no-matches" hidden></p>
+    <div id="libraryScroll" class="library-scroll">
+      <section id="continueRow" class="continue" aria-labelledby="continueTitle" hidden>
+        <h2 id="continueTitle" class="row-heading">Continue watching</h2>
+        <div id="continueTrack" class="continue-track"></div>
+      </section>
+      <h2 id="libraryHeading" class="row-heading row-heading-library" hidden>Your library</h2>
+      <main id="torrentGrid" class="torrent-grid" hidden></main>
+      <main id="torrentList" class="torrent-list" hidden></main>
+      <p id="noMatches" class="no-matches" hidden></p>
+    </div>
 
     <section id="emptyState" class="empty" hidden>
       <div class="empty-strip" aria-hidden="true"></div>
       <h1>Paste a magnet link to start watching.</h1>
       <p>Videos play while they download, and you can skip to any point. Pieces you jump to are fetched first.</p>
-      <p class="empty-hint">You can also drop <b>.torrent</b> files anywhere in this window, or press <kbd>⌘V</kbd> to add a magnet link from your clipboard.</p>
+      <p><button id="emptyDiscoverBtn" class="btn btn-primary"><svg class="ic"><use href="#i-compass"/></svg>Browse free films and music</button></p>
+      <p class="empty-hint" data-i18n-html>You can also drop <b>.torrent</b> files anywhere in this window, or press <kbd>⌘V</kbd> to add a magnet link from your clipboard.</p>
     </section>
   </div>
 
@@ -153,7 +165,7 @@
           <div id="speedMenu" class="menu menu-up" role="menu" hidden></div>
         </div>
         <div class="menu-wrap">
-          <button id="ccBtn" class="btn btn-icon" title="Subtitles (C)" aria-label="Subtitles" aria-haspopup="menu"><svg class="ic"><use href="#i-cc"/></svg></button>
+          <button id="ccBtn" class="btn btn-icon" title="Audio and subtitles (C)" aria-label="Audio and subtitles" aria-haspopup="menu"><svg class="ic"><use href="#i-cc"/></svg></button>
           <div id="ccMenu" class="menu menu-up cc-panel" role="dialog" aria-label="Subtitles" hidden></div>
         </div>
         <div class="menu-wrap">
@@ -183,10 +195,21 @@
         </div>
         <button type="button" id="prefPathBtn" class="btn btn-ghost">Change…</button>
       </div>
+      <label class="pref-row pref-toggle">
+        <span class="pref-label">Ask where to save each torrent</span>
+        <input type="checkbox" id="prefAskPath">
+      </label>
       <div class="pref-row">
         <label class="pref-label" for="prefDownLimit">Download speed limit</label>
         <span class="unit-input"><input type="number" id="prefDownLimit" min="0" step="50" placeholder="No limit"><span>KB/s</span></span>
       </div>
+      <label class="pref-row pref-toggle">
+        <span>
+          <span class="pref-label">Upload to other people</span>
+          <span class="pref-value">When off, nobody can download anything from this computer. Downloads may be slower, because many people send faster to those who share back.</span>
+        </span>
+        <input type="checkbox" id="prefUploads">
+      </label>
       <div class="pref-row">
         <label class="pref-label" for="prefUpLimit">Upload speed limit</label>
         <span class="unit-input"><input type="number" id="prefUpLimit" min="0" step="10" placeholder="No limit"><span>KB/s</span></span>
@@ -199,6 +222,21 @@
         <span class="unit-input"><input type="number" id="prefRatio" min="0" step="0.5" placeholder="Never"></span>
       </div>
 
+      <div class="pref-row">
+        <div>
+          <label class="pref-label" for="prefMaxActive">Download at most</label>
+          <div class="pref-value">The rest wait in a queue and start, oldest first, as others finish.</div>
+        </div>
+        <span class="unit-input"><input type="number" id="prefMaxActive" min="0" step="1" placeholder="All"><span>at once</span></span>
+      </div>
+      <label class="pref-row pref-toggle">
+        <span>
+          <span class="pref-label">Pause other downloads while I watch</span>
+          <span class="pref-value">The video you’re watching gets all the bandwidth. Others carry on when you close it.</span>
+        </span>
+        <input type="checkbox" id="prefHoldOthers">
+      </label>
+
       <h3>Playback</h3>
       <label class="pref-row pref-toggle">
         <span class="pref-label">Play the first video when a torrent is added</span>
@@ -210,7 +248,7 @@
           <div id="prefPlayerPath" class="pref-value"></div>
         </div>
         <select id="prefPlayer" class="select">
-          <option value="builtin">onlyTorrent</option>
+          <option value="builtin">Magnetic</option>
           <option value="vlc">VLC</option>
           <option value="custom">Another app…</option>
         </select>
@@ -225,12 +263,20 @@
           <option value="light">Light</option>
         </select>
       </div>
+      <div class="pref-row">
+        <label class="pref-label" for="prefLanguage">Language</label>
+        <select id="prefLanguage" class="select">
+          <option value="system">Match system</option>
+          <option value="en" translate="no" lang="en">English</option>
+          <option value="ar" translate="no" lang="ar">العربية</option>
+        </select>
+      </div>
       <label class="pref-row pref-toggle">
         <span class="pref-label">Notify me when a download finishes</span>
         <input type="checkbox" id="prefNotify">
       </label>
       <label class="pref-row pref-toggle">
-        <span class="pref-label">Open onlyTorrent when I log in</span>
+        <span class="pref-label">Open Magnetic when I log in</span>
         <input type="checkbox" id="prefLogin">
       </label>
       <label class="pref-row pref-toggle" id="prefTrayRow">
@@ -239,13 +285,30 @@
       </label>
       <div class="pref-row">
         <div>
-          <div class="pref-label">Open magnet links from the browser in onlyTorrent</div>
+          <div class="pref-label">Open magnet links from the browser in Magnetic</div>
           <div id="prefHandlerState" class="pref-value"></div>
         </div>
         <button type="button" id="prefHandlerBtn" class="btn btn-ghost">Make default</button>
       </div>
+      <h3>Trackers</h3>
+      <label class="pref-row pref-toggle">
+        <span>
+          <span class="pref-label">Add these trackers to every download</span>
+          <span class="pref-value">Helps magnet links find people sooner. Private torrents are left alone.</span>
+        </span>
+        <input type="checkbox" id="prefTrackersOn">
+      </label>
+      <label class="field field-flush">
+        <span class="pref-value">One per line. New shares start with this list too.</span>
+        <textarea id="prefTrackers" dir="ltr" rows="5" spellcheck="false" aria-label="Trackers, one per line"></textarea>
+      </label>
+      <div class="tracker-pref-foot">
+        <span id="prefTrackersNote" class="pref-value" aria-live="polite"></span>
+        <button type="button" id="prefTrackersReset" class="btn btn-ghost btn-small">Restore defaults</button>
+      </div>
+
       <h3>Online subtitles</h3>
-      <p class="pref-note">Search uses your own free <a href="#" id="osLink">OpenSubtitles.com</a> account. Create an API key under Profile, then API consumers. Downloads also need your username and password, which are stored encrypted in your system keychain.</p>
+      <p class="pref-note" data-i18n-html>Search uses your own free <a href="#" id="osLink">OpenSubtitles.com</a> account. Create an API key under Profile, then API consumers. Downloads also need your username and password, which are stored encrypted in your system keychain.</p>
       <div class="pref-row">
         <label class="pref-label" for="prefOsKey">API key</label>
         <input id="prefOsKey" class="text-input" type="text" spellcheck="false" autocomplete="off" placeholder="Not set">
@@ -268,7 +331,8 @@
   <dialog id="shareDialog" class="dialog" autofocus tabindex="-1">
     <form method="dialog" id="shareForm">
       <h2>Share files as a torrent</h2>
-      <p class="dialog-body">onlyTorrent seeds straight from where the files are, so keep them in place while you share.</p>
+      <p class="dialog-body">Magnetic seeds straight from where the files are, so keep them in place while you share.</p>
+      <p id="shareUploadNote" class="pref-note share-note" hidden>Uploading is off in Preferences, so nobody can download these files from you. Turn it on to share.</p>
       <div class="share-pick">
         <button type="button" class="btn btn-ghost" data-pick="file">Choose a file…</button>
         <button type="button" class="btn btn-ghost" data-pick="folder">Choose a folder…</button>
@@ -278,7 +342,7 @@
         <summary>Advanced options</summary>
         <label class="field">
           <span class="pref-label">Trackers, one per line</span>
-          <textarea id="shareTrackers" rows="5" spellcheck="false"></textarea>
+          <textarea id="shareTrackers" dir="ltr" rows="5" spellcheck="false"></textarea>
         </label>
         <label class="field">
           <span class="pref-label">Comment</span>
@@ -328,6 +392,51 @@
     </form>
   </dialog>
 
+  <dialog id="discoverDialog" class="dialog dialog-discover" autofocus tabindex="-1" aria-labelledby="discoverTitle">
+    <form method="dialog" id="discoverForm" class="discover">
+      <div class="discover-head">
+        <div>
+          <h2 id="discoverTitle">Discover</h2>
+          <p class="discover-lede">Public-domain and openly licensed films and music from the Internet Archive.</p>
+        </div>
+        <button class="btn btn-icon discover-close" value="close" title="Close (Esc)" aria-label="Close">
+          <svg class="ic"><use href="#i-plus"/></svg>
+        </button>
+      </div>
+      <div class="discover-controls">
+        <label class="search discover-search">
+          <svg class="ic"><use href="#i-search"/></svg>
+          <input id="discoverInput" type="search" placeholder="Search titles, e.g. Nosferatu" aria-label="Search the Internet Archive" spellcheck="false">
+        </label>
+        <div class="segmented segmented-text" role="radiogroup" aria-label="Kind">
+          <button type="button" role="radio" class="seg" data-kind="film">Films</button>
+          <button type="button" role="radio" class="seg" data-kind="music">Music</button>
+        </div>
+      </div>
+      <p id="discoverStatus" class="discover-status" aria-live="polite"></p>
+      <div id="discoverResults" class="discover-grid"></div>
+      <div class="discover-more"><button type="button" id="discoverMore" class="btn btn-ghost" hidden>Show more</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="trackersDialog" class="dialog dialog-wide" autofocus tabindex="-1" aria-labelledby="trackersTitle">
+    <form method="dialog" id="trackersForm">
+      <h2 id="trackersTitle">Trackers</h2>
+      <p id="trackersSummary" class="dialog-body" aria-live="polite"></p>
+      <ul id="trackersList" class="tracker-list"></ul>
+      <label class="field">
+        <span class="pref-label">Add trackers</span>
+        <textarea id="trackersAdd" dir="ltr" rows="2" spellcheck="false" placeholder="udp://tracker.example.org:1337/announce"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="trackersRemoveDead" class="btn btn-ghost btn-danger">Remove dead trackers</button>
+        <span class="spacer"></span>
+        <button type="button" id="trackersAddBtn" class="btn btn-ghost">Add</button>
+        <button class="btn btn-primary" value="close">Done</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="removeDialog" class="dialog" autofocus tabindex="-1">
     <form method="dialog">
       <h2 id="removeTitle">Remove torrent?</h2>
@@ -342,6 +451,7 @@
 
   <div id="rowMenu" class="menu row-menu" role="menu" hidden>
     <button role="menuitem" data-act="files">Choose files…</button>
+    <button role="menuitem" data-act="trackers">Trackers…</button>
     <button role="menuitem" data-act="folder">Show in folder</button>
     <button role="menuitem" data-act="magnet">Copy magnet link</button>
     <button role="menuitem" data-act="save">Save .torrent file…</button>
@@ -349,7 +459,7 @@
     <button role="menuitem" data-act="remove" class="danger">Remove…</button>
   </div>
 
-  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <div id="toasts" class="toasts" popover="manual" aria-live="polite"></div>
 
   <script type="module" src="app.js"></script>
 </body>

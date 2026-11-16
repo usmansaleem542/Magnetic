@@ -3,7 +3,7 @@ import {
   powerSaveBlocker, Tray, nativeImage, nativeTheme, screen, safeStorage
 } from 'electron'
 import WebTorrent from 'webtorrent'
-import parseTorrent from 'parse-torrent'
+import parseTorrent, { toMagnetURI } from 'parse-torrent'
 import http from 'node:http'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -11,12 +11,21 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { kindOf, mimeOf, parseRange, pickPosterFile, stripFromBitfield } from './lib/media.js'
+import { kindOf, mimeOf, parseRange, pickPosterFile, stripFromBitfield, isPaddingFile, bytesNeeded } from './lib/media.js'
+import { searchArchive, archiveDeselect } from './lib/archive.js'
+import { Client as TrackerClient } from 'bittorrent-tracker'
+import ffmpegStatic from 'ffmpeg-static'
+import { probeMedia, findKeyframe, transcodeArgs, needsAudioConversion } from './lib/transcode.js'
+
+// Chromium hides a video's audio tracks unless this is on; we need it to switch languages
+app.commandLine.appendSwitch('enable-blink-features', 'AudioVideoTracks')
+import { DEFAULT_TRACKERS, planTrackers, parseTrackerList, mergeTrackers, normaliseTracker, trackerKey, instrumentTrackers, isDead } from './lib/trackers.js'
 import { createCaster, lanAddress } from './lib/cast.js'
 import { decodeSubtitle, ENCODINGS } from './lib/subtitle-decode.js'
 import { createClient as createOpenSubtitles, movieHash, queryFromFileName } from './lib/opensubtitles.js'
 import { extractEmbeddedSubtitles } from './lib/embedded-subs.js'
 import { languageFromName } from './renderer/subtitles.js'
+import { t, ltr, setLanguage, getLanguage, resolveLanguage } from './renderer/i18n.js'
 import { Readable } from 'node:stream'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -53,6 +62,7 @@ let caster = null
 let STATE_FILE, TORRENT_DIR, POSTER_DIR
 let state = { prefs: {}, torrents: [] }
 const live = new Map() // infoHash -> WebTorrent torrent
+const trackerRuntime = new Map() // infoHash -> { status: Map(url -> info), extra: TrackerClient, key }
 const TOKEN = crypto.randomBytes(12).toString('hex')
 let localPort = 0
 let lanServer = null
@@ -65,16 +75,22 @@ const defaultPrefs = () => ({
   notifyOnComplete: true,
   autoPlay: true,
   theme: 'system', // system | dark | light
+  language: 'system', // system | en | ar
   externalPlayer: 'builtin', // builtin | vlc | custom
   externalPlayerPath: '',
   downloadLimit: 0, // KB/s, 0 = unlimited
   uploadLimit: 0,
+  allowUploads: false, // off: nobody can download anything from this computer
   seedRatioLimit: 0, // 0 = seed forever
   openAtLogin: false,
   closeToTray: !isMac,
   osApiKey: '',
   osUsername: '',
-  osPassword: '' // encrypted with the OS keychain via safeStorage, base64
+  osPassword: '', // encrypted with the OS keychain via safeStorage, base64
+  trackers: [...DEFAULT_TRACKERS], // added to downloads (if enabled) and used for new shares
+  trackersForDownloads: true,
+  maxActiveDownloads: 0, // 0 = no limit; the rest wait in a queue
+  pauseOthersWhileWatching: true // give the torrent being watched all the bandwidth
 })
 
 function loadState () {
@@ -119,7 +135,7 @@ function captureProgress (entry) {
 async function resolveId (id) {
   if (typeof id === 'string' && /^https?:\/\//i.test(id)) {
     const res = await fetch(id)
-    if (!res.ok) throw new Error(`Couldn't download the .torrent file (HTTP ${res.status}).`)
+    if (!res.ok) throw new Error(t("Couldn't download the .torrent file (HTTP {status}).", { status: res.status }))
     return Buffer.from(await res.arrayBuffer())
   }
   if (typeof id === 'string' && !/^magnet:/i.test(id) && !/^[a-f0-9]{40}$/i.test(id) && fs.existsSync(id)) {
@@ -134,23 +150,29 @@ async function addTorrent (rawId, opts = {}) {
   try {
     parsed = await parseTorrent(id)
   } catch {
-    throw new Error('That isn\'t a valid magnet link, info hash or .torrent file.')
+    throw new Error(t("That isn't a valid magnet link, info hash or .torrent file."))
   }
   const infoHash = parsed.infoHash
   let entry = entryOf(infoHash)
   if (entry) {
     if (entry.paused) resumeTorrent(infoHash)
-    toast(`${entry.name || 'This torrent'} is already in your list.`)
+    toast(t('{name} is already in your list.', { name: entry.name || t('This torrent') }))
     return infoHash
+  }
+  let savePath = opts.path
+  if (!savePath && state.prefs.askSavePath) {
+    savePath = await askSavePath(parsed.name)
+    if (!savePath) return null // the person cancelled
+    if (entryOf(infoHash)) return infoHash // added again while the dialog was open
   }
   entry = {
     infoHash,
-    magnet: typeof id === 'string' ? id : parseTorrent.toMagnetURI(parsed),
+    magnet: typeof id === 'string' ? id : toMagnetURI(parsed),
     torrentFile: null,
     name: parsed.name || '',
-    path: opts.path || state.prefs.downloadPath,
+    path: savePath || state.prefs.downloadPath,
     paused: false,
-    deselected: [],
+    deselected: opts.pickBest && parsed.files ? archiveDeselect(parsed.files) : [],
     length: parsed.length || 0,
     progress: 0,
     files: [],
@@ -162,10 +184,29 @@ async function addTorrent (rawId, opts = {}) {
     fs.writeFileSync(entry.torrentFile, id)
   }
   state.torrents.unshift(entry)
-  startTorrent(entry, id)
+  if (parsed.files?.length) { entry.spaceChecked = true; checkSpace(entry, parsed.files) }
+  schedule(entry.infoHash)
   saveState()
-  pushTorrents()
   return infoHash
+}
+
+async function askSavePath (name) {
+  const r = await dialog.showOpenDialog(win, {
+    title: name ? t('Save “{name}” to…', { name }) : t('Save torrent to…'),
+    buttonLabel: t('Save here'),
+    defaultPath: state.prefs.lastSavePath || state.prefs.downloadPath,
+    properties: ['openDirectory', 'createDirectory']
+  })
+  if (r.canceled || !r.filePaths[0]) return null
+  state.prefs.lastSavePath = r.filePaths[0]
+  return r.filePaths[0]
+}
+
+// one at a time, so "ask where to save" never stacks dialogs
+async function addEach (ids, opts) {
+  const out = []
+  for (const id of ids) out.push(await addTorrent(id, opts))
+  return out
 }
 
 function startTorrent (entry, idOverride) {
@@ -181,39 +222,193 @@ function startTorrent (entry, idOverride) {
   return t
 }
 
-function wireTorrent (entry, t) {
-  t.on('ready', () => {
+function wireTorrent (entry, tor) {
+  // Uploads off: never "unchoke" a peer, which is how BitTorrent agrees to send data.
+  // Requests from choked peers are refused by the protocol, and our own downloads are
+  // unaffected. (Throttling uploads to 0 would also stall our own piece requests.)
+  tor.on('wire', wire => {
+    const unchoke = wire.unchoke.bind(wire)
+    wire.unchoke = () => { if (state.prefs.allowUploads) unchoke() }
+  })
+  // fires after WebTorrent has merged the announce list, before it starts announcing
+  tor.once('infoHash', () => {
+    entry.ownTrackers = mergeTrackers(tor.announce)
+    tor.announce = planFor(entry, tor).own
+    const startDiscovery = tor._startDiscovery.bind(tor)
+    tor._startDiscovery = () => {
+      startDiscovery()
+      instrumentTrackers(tor.discovery?.tracker, runtimeOf(entry.infoHash).status)
+    }
+    syncExtraTrackers(entry, tor)
+  })
+  tor.once('close', () => {
+    const rt = trackerRuntime.get(entry.infoHash)
+    if (rt?.extra) { rt.extra.destroy(); rt.extra = null; rt.key = '' }
+    rt?.status.clear()
+  })
+  tor.on('ready', () => {
     // keep a .torrent copy so restarts don't need to fetch metadata again
-    if (!entry.torrentFile && t.torrentFile) {
+    if (!entry.torrentFile && tor.torrentFile) {
       entry.torrentFile = path.join(TORRENT_DIR, `${entry.infoHash}.torrent`)
       fs.mkdirSync(TORRENT_DIR, { recursive: true })
-      fs.writeFileSync(entry.torrentFile, t.torrentFile)
+      fs.writeFileSync(entry.torrentFile, tor.torrentFile)
     }
-    applySelection(entry, t)
-    const poster = pickPosterFile(t.files)
+    applySelection(entry, tor)
+    if (!entry.spaceChecked) { entry.spaceChecked = true; checkSpace(entry, tor.files) }
+    const poster = pickPosterFile(tor.files)
     if (poster) poster.select() // small, and it makes the list look right sooner
-    else extractAlbumArt(entry, t)
+    else extractAlbumArt(entry, tor)
     captureProgress(entry)
     saveState()
     pushTorrents()
   })
-  t.on('done', () => {
+  tor.on('done', () => {
     captureProgress(entry)
     saveState()
+    setImmediate(schedule) // a download slot is free
     if (entry.notified) return
     entry.notified = true
     if (state.prefs.notifyOnComplete && Notification.isSupported()) {
-      new Notification({ title: 'Download complete', body: t.name }).show()
+      new Notification({ title: t('Download complete'), body: tor.name }).show()
     }
     if (isMac) app.dock?.bounce('informational')
     if (win && !win.isFocused()) { unseenCompletions++; updateBadge() }
   })
-  t.on('error', err => {
+  tor.on('error', err => {
     live.delete(entry.infoHash)
     entry.paused = true
-    toast(`${entry.name || 'Torrent'}: ${err.message}`, 'error')
+    const full = err.code === 'ENOSPC' || /ENOSPC|no space left/i.test(err.message)
+    toast(full ? t('{name} stopped: the drive is full. Free up space, then resume it.', { name: entry.name || t('A torrent') }) : `${entry.name || t('Torrent')}: ${err.message}`, 'error')
     saveState()
   })
+}
+
+// ---------- trackers ----------
+function runtimeOf (ih) {
+  if (!trackerRuntime.has(ih)) trackerRuntime.set(ih, { status: new Map(), extra: null, key: '' })
+  return trackerRuntime.get(ih)
+}
+
+function planFor (entry, t) {
+  return planTrackers({
+    own: entry.ownTrackers || t?.announce || [],
+    added: entry.addedTrackers || [],
+    removed: entry.removedTrackers || [],
+    global: state.prefs.trackers || [],
+    useGlobal: state.prefs.trackersForDownloads !== false,
+    isPrivate: !!t?.private
+  })
+}
+
+/** Run (or rebuild) the second tracker client that announces to the trackers we add. */
+function syncExtraTrackers (entry, t) {
+  if (!t || t.destroyed || !t.infoHash) return
+  const rt = runtimeOf(entry.infoHash)
+  const { extra } = planFor(entry, t)
+  const key = extra.join('\n')
+  if (key === rt.key) return
+  if (rt.extra) { rt.extra.destroy(); rt.extra = null }
+  for (const url of rt.status.keys()) if (!extra.includes(url) && !(t.announce || []).includes(url)) rt.status.delete(url)
+  rt.key = key
+  if (!extra.length) return
+  const tc = new TrackerClient({
+    infoHash: t.infoHash,
+    peerId: client.peerId,
+    announce: extra,
+    port: client.torrentPort,
+    wrtc: client.tracker?.wrtc,
+    getAnnounceOpts: () => ({
+      uploaded: t.uploaded || 0,
+      downloaded: t.downloaded || 0,
+      left: t.length ? Math.max(t.length - t.downloaded, 0) : 1
+    })
+  })
+  tc.on('peer', peer => { if (!t.destroyed) { try { t.addPeer(peer, 'tracker') } catch {} } })
+  tc.on('warning', () => {}) // recorded per tracker by instrumentTrackers
+  tc.on('error', () => {})
+  instrumentTrackers(tc, rt.status)
+  tc.start()
+  rt.extra = tc
+}
+
+/** Stop announcing to some of the torrent's own trackers without restarting it. */
+function dropOwnTrackers (t, urls) {
+  if (!t) return
+  const gone = new Set(urls.map(trackerKey))
+  t.announce = (t.announce || []).filter(u => !gone.has(trackerKey(u)))
+  const tc = t.discovery?.tracker
+  if (!tc?._trackers) return
+  tc._trackers = tc._trackers.filter(tr => {
+    if (!gone.has(trackerKey(tr.announceUrl))) return true
+    try { tr.destroy() } catch {}
+    return false
+  })
+}
+
+function trackerList (ih) {
+  const entry = entryOf(ih)
+  if (!entry) throw new Error(t('That torrent is no longer in your list.'))
+  const tor = live.get(ih)
+  const rt = runtimeOf(ih)
+  if (tor) instrumentTrackers(tor.discovery?.tracker, rt.status)
+  const plan = planFor(entry, tor)
+  const added = new Set((entry.addedTrackers || []).map(normaliseTracker))
+  const fromTorrent = new Set(entry.ownTrackers || [])
+  const running = new Set(tor?.discovery?.tracker?._trackers?.map(tr => normaliseTracker(tr.announceUrl)) || [])
+  const row = url => {
+    const info = rt.status.get(url)
+    let st = info || { state: tor ? 'checking' : 'paused' }
+    if (!tor) st = { state: 'paused' }
+    // the tracker client skips addresses it can't use (bad port, unknown protocol)
+    else if (fromTorrent.has(url) && tor.discovery?.tracker && !running.has(url)) st = { state: 'invalid', message: t('Unsupported address') }
+    return {
+      url,
+      source: fromTorrent.has(url) ? 'torrent' : added.has(url) ? 'added' : 'preferences',
+      ...st
+    }
+  }
+  return {
+    private: !!tor?.private,
+    paused: !tor,
+    trackers: [...plan.own, ...plan.extra].map(row)
+  }
+}
+
+function addTrackersTo (ih, text) {
+  const entry = entryOf(ih)
+  if (!entry) throw new Error(t('That torrent is no longer in your list.'))
+  const { valid, invalid } = parseTrackerList(text)
+  entry.addedTrackers = mergeTrackers(entry.addedTrackers, valid)
+  const addedKeys = new Set(valid.map(trackerKey))
+  entry.removedTrackers = (entry.removedTrackers || []).filter(u => !addedKeys.has(trackerKey(u)))
+  syncExtraTrackers(entry, live.get(ih))
+  saveState()
+  return { added: valid.length, invalid }
+}
+
+function removeTrackersFrom (ih, urls) {
+  const entry = entryOf(ih)
+  if (!entry) throw new Error(t('That torrent is no longer in your list.'))
+  const list = urls.map(normaliseTracker)
+  entry.removedTrackers = mergeTrackers(entry.removedTrackers, list)
+  const keys = new Set(list.map(trackerKey))
+  entry.addedTrackers = (entry.addedTrackers || []).filter(u => !keys.has(trackerKey(u)))
+  const tor = live.get(ih)
+  dropOwnTrackers(tor, list)
+  syncExtraTrackers(entry, tor)
+  const rt = runtimeOf(ih)
+  for (const u of list) rt.status.delete(u)
+  saveState()
+  return list.length
+}
+
+function removeDeadTrackers (ih) {
+  const dead = trackerList(ih).trackers.filter(isDead).map(r => r.url)
+  return dead.length ? removeTrackersFrom(ih, dead) : 0
+}
+
+function resyncAllTrackers () {
+  for (const entry of state.torrents) syncExtraTrackers(entry, live.get(entry.infoHash))
 }
 
 function applySelection (entry, t) {
@@ -231,25 +426,113 @@ function waitReady (t) {
   })
 }
 
+function stopTorrent (entry) {
+  const t = live.get(entry.infoHash)
+  if (!t) return
+  captureProgress(entry)
+  live.delete(entry.infoHash)
+  client.remove(t, { destroyStore: false }).catch(() => {})
+}
+
 function pauseTorrent (ih) {
   const entry = entryOf(ih)
-  const t = live.get(ih)
   if (!entry) return
-  captureProgress(entry)
   entry.paused = true
-  if (t) {
-    live.delete(ih)
-    client.remove(t, { destroyStore: false }).catch(() => {})
-  }
+  entry.queued = null
+  stopTorrent(entry)
+  schedule() // frees a download slot
   saveState()
-  pushTorrents()
 }
 
 function resumeTorrent (ih) {
   const entry = entryOf(ih)
   if (!entry) return
-  startTorrent(entry)
+  entry.paused = false
+  schedule(ih)
   saveState()
+}
+
+// ---------- disk space ----------
+const LOW_SPACE = 1024 ** 3 // below 1 GB free, downloads pause before the drive fills up
+const gb = n => ltr(n >= 1024 ** 3 ? `${(n / 1024 ** 3).toFixed(1)} GB` : `${Math.round(n / 1024 ** 2)} MB`)
+
+/** Free bytes on the drive holding `dir` (or its nearest existing parent), or null. */
+function freeBytes (dir) {
+  let d = path.resolve(dir)
+  while (!fs.existsSync(d) && path.dirname(d) !== d) d = path.dirname(d)
+  try {
+    const st = fs.statfsSync(d)
+    return st.bavail * st.bsize
+  } catch {
+    return null
+  }
+}
+
+/** Warn when a torrent won't fit. Called when its size becomes known. */
+function checkSpace (entry, files) {
+  const need = bytesNeeded(files, entry.deselected)
+  const free = freeBytes(entry.path)
+  if (free == null || need <= free) return true
+  toast(t('{name} needs {need}, but only {free} is free on that drive. Free up space, or untick some files under ⋯ → Choose files.', { name: entry.name || t('This torrent'), need: gb(need), free: gb(free) }), 'error')
+  return false
+}
+
+let lowSpaceWarned = false
+function guardDiskSpace () {
+  const downloading = state.torrents.filter(e => live.has(e.infoHash) && !isComplete(e))
+  if (!downloading.length) { lowSpaceWarned = false; return }
+  const paths = [...new Set(downloading.map(e => e.path))]
+  for (const dir of paths) {
+    const free = freeBytes(dir)
+    if (free == null || free >= LOW_SPACE) continue
+    for (const e of downloading) if (e.path === dir) pauseTorrent(e.infoHash)
+    if (!lowSpaceWarned) toast(t('Downloads paused: only {free} is left on the drive. Free up space, then resume them.', { free: gb(free) }), 'error')
+    lowSpaceWarned = true
+    return
+  }
+  lowSpaceWarned = false
+}
+
+// ---------- queue: which torrents run ----------
+// Torrents the person hasn't paused run unless (a) the download limit is reached, oldest
+// first, or (b) they're watching another torrent that's still downloading and asked for
+// other downloads to wait. Finished torrents keep seeding either way.
+let watching = null // infoHash open in the player
+const isComplete = entry => {
+  const t = live.get(entry.infoHash)
+  return t ? !!t.done : entry.length > 0 && entry.progress >= 1
+}
+
+function schedule (forceIh = null) {
+  if (!client) return
+  const limit = Math.floor(Number(state.prefs.maxActiveDownloads)) || 0
+  const watched = watching && entryOf(watching)
+  const holding = !!watched && !watched.paused && !isComplete(watched) && state.prefs.pauseOthersWhileWatching !== false
+  const allowed = new Set()
+  let slots = limit > 0 ? limit : Infinity
+  if (watched && !watched.paused) { allowed.add(watched.infoHash); slots-- }
+  if (!holding) {
+    // running downloads keep their slot; free slots go to the oldest waiting torrent
+    const waiting = state.torrents.filter(e => !e.paused && !isComplete(e) && !allowed.has(e.infoHash))
+      .sort((a, b) => Number(live.has(b.infoHash)) - Number(live.has(a.infoHash)) || (a.addedAt || 0) - (b.addedAt || 0))
+    for (const e of waiting) if (slots-- > 0) allowed.add(e.infoHash)
+  }
+  for (const e of state.torrents) {
+    if (e.paused) { e.queued = null; continue }
+    // with uploads off, finished torrents have nothing to do online unless they're playing
+    const run = allowed.has(e.infoHash) || (isComplete(e) && state.prefs.allowUploads)
+    if (!run && isComplete(e)) { e.queued = null; stopTorrent(e); continue }
+    if (run) {
+      e.queued = null
+      if (!live.has(e.infoHash)) startTorrent(e)
+    } else {
+      e.queued = holding ? 'watching' : 'limit'
+      stopTorrent(e)
+    }
+  }
+  if (forceIh && entryOf(forceIh)?.queued === 'limit') {
+    toast(t('{name} is queued. It starts when another download finishes.', { name: entryOf(forceIh).name || t('This torrent') }))
+  }
   pushTorrents()
 }
 
@@ -279,8 +562,9 @@ async function removeTorrent (ih, deleteData) {
   if (entry.torrentFile) fs.rmSync(entry.torrentFile, { force: true })
   fs.rmSync(posterPath(ih), { force: true })
   state.torrents = state.torrents.filter(e => e !== entry)
+  if (watching === ih) watching = null
   saveState()
-  pushTorrents()
+  schedule() // frees a download slot
 }
 
 function setFileSelected (ih, index, selected) {
@@ -303,9 +587,9 @@ function seedPath (input, opts = {}) {
     if (opts.announce?.length) seedOpts.announceList = opts.announce.map(u => [u])
     if (opts.comment) seedOpts.comment = opts.comment
     if (opts.private) seedOpts.private = true
-    const t = client.seed(input, seedOpts, torrent => {
+    const seeding = client.seed(input, seedOpts, torrent => {
       if (entryOf(torrent.infoHash)) {
-        toast(`${torrent.name} is already in your list.`)
+        toast(t('{name} is already in your list.', { name: torrent.name }))
         return resolve(entryOf(torrent.infoHash))
       }
       const entry = {
@@ -332,7 +616,7 @@ function seedPath (input, opts = {}) {
       pushTorrents()
       resolve(entry)
     })
-    t.once('error', reject)
+    seeding.once('error', reject)
   })
 }
 
@@ -406,7 +690,7 @@ function snapshot (entry) {
     length: f.length,
     progress: f.progress ?? 0,
     selected: !entry.deselected.includes(i),
-    kind: kindOf(f.name)
+    kind: isPaddingFile(f.path) ? 'padding' : kindOf(f.name)
   }))
   const base = {
     infoHash: entry.infoHash,
@@ -419,9 +703,10 @@ function snapshot (entry) {
     seedLimitReached: !!entry.seedLimitReached
   }
   if (!t) {
-    return { ...base, status: 'paused', progress: entry.progress || 0, downloadSpeed: 0, uploadSpeed: 0, numPeers: 0, timeRemaining: Infinity, pieces: [] }
+    const status = entry.paused ? 'paused' : isComplete(entry) ? 'done' : entry.queued ? 'queued' : 'paused'
+    return { ...base, status, queueReason: entry.queued || null, progress: entry.progress || 0, downloadSpeed: 0, uploadSpeed: 0, numPeers: 0, timeRemaining: Infinity, pieces: [] }
   }
-  const status = !t.ready ? 'metadata' : t.done ? 'seeding' : 'downloading'
+  const status = !t.ready ? 'metadata' : t.done ? (state.prefs.allowUploads ? 'seeding' : 'done') : 'downloading'
   return {
     ...base,
     status,
@@ -445,7 +730,9 @@ function pushTorrents () {
   })
 }
 
+let lastSpaceCheck = 0
 function tick () {
+  if (Date.now() - lastSpaceCheck > 10000) { lastSpaceCheck = Date.now(); guardDiskSpace() }
   // stop seeding once the share ratio limit is reached
   const limit = Number(state.prefs.seedRatioLimit) || 0
   if (limit > 0) {
@@ -538,6 +825,10 @@ function handleRequest (req, res) {
     return sendFile(req, res, { length: body.length, name: 'subs.vtt', open: (s, e) => Readable.from([body.subarray(s, e + 1)]) })
   }
 
+  if (parts[1] === 'tx' && /^[a-f0-9]{40}$/.test(parts[2] || '') && /^\d+$/.test(parts[3] || '')) {
+    return sendConverted(req, res, parts[2], Number(parts[3]), Number(url.searchParams.get('start')) || 0, Number(url.searchParams.get('audio')) || 0)
+  }
+
   if (/^[a-f0-9]{40}$/.test(parts[1] || '') && /^\d+$/.test(parts[2] || '')) {
     const t = live.get(parts[1])
     const file = t?.ready && t.files[Number(parts[2])]
@@ -559,12 +850,54 @@ function listen (host, port = 0) {
 const streamUrl = (ih, index, name, host = '127.0.0.1', port = localPort) =>
   `http://${host}:${port}/${TOKEN}/${ih}/${index}/${encodeURIComponent(name)}`
 
+// ---------- audio conversion (AC3, DTS…) ----------
+// The bundled ffmpeg sits inside node_modules; packaged builds unpack it next to app.asar.
+const ffmpegPath = () => state.prefs.ffmpegPath || (ffmpegStatic ? ffmpegStatic.replace('app.asar', 'app.asar.unpacked') : null)
+const probes = new Map() // "ih:index" -> Promise<probe>
+const converting = new Set() // running ffmpeg processes
+
+function probeFile (ih, index) {
+  const key = `${ih}:${index}`
+  if (!probes.has(key)) {
+    const file = live.get(ih)?.files[index]
+    if (!file) throw new Error(t('File not found in this torrent.'))
+    const p = probeMedia(ffmpegPath(), streamUrl(ih, index, file.name)).then(info => ({
+      ...info,
+      convertAudio: info.audio.some(a => needsAudioConversion(a.codec)),
+      audio: info.audio.map(a => ({ ...a, needsConversion: needsAudioConversion(a.codec) }))
+    }))
+    p.catch(() => probes.delete(key)) // try again next time
+    probes.set(key, p)
+  }
+  return probes.get(key)
+}
+
+function sendConverted (req, res, ih, index, start, audio) {
+  const t = live.get(ih)
+  const file = t?.ready && t.files[index]
+  const bin = ffmpegPath()
+  if (!file || !bin) { res.statusCode = 404; return res.end() }
+  Promise.resolve(probes.get(`${ih}:${index}`)).then(info => run(info?.video?.codec || ''), () => run(''))
+  function run (videoCodec) {
+    if (res.destroyed) return
+    const ff = spawn(bin, transcodeArgs({ input: streamUrl(ih, index, file.name), start, audio, videoCodec }), { windowsHide: true })
+    converting.add(ff)
+    ff.on('close', () => converting.delete(ff))
+    ff.on('error', () => { if (!res.headersSent) { res.statusCode = 500; res.end() } })
+    ff.stderr.on('data', d => console.error('[ffmpeg]', String(d).trim()))
+    res.writeHead(200, { 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' })
+    ff.stdout.pipe(res)
+    // the player dropped this stream (seek, new file, closed): stop converting
+    res.on('close', () => ff.kill('SIGKILL'))
+  }
+}
+
 async function liveReady (ih) {
   const entry = entryOf(ih)
-  if (!entry) throw new Error('Torrent not found.')
-  const t = startTorrent(entry)
+  if (!entry) throw new Error(t('Torrent not found.'))
+  const tor = startTorrent(entry)
   pushTorrents()
-  return waitReady(t)
+  return waitReady(tor)
 }
 
 async function readFileBytes (file, start = 0, end = file.length - 1) {
@@ -600,7 +933,7 @@ function storedPassword () {
 async function openSubtitles () {
   const key = `${state.prefs.osApiKey}|${state.prefs.osUsername}|${state.prefs.osPassword}`
   if (!osClient || key !== osClientKey) {
-    osClient = createOpenSubtitles({ apiKey: state.prefs.osApiKey, userAgent: `onlyTorrent v${app.getVersion()}` })
+    osClient = createOpenSubtitles({ apiKey: state.prefs.osApiKey, userAgent: `Magnetic v${app.getVersion()}` })
     osClientKey = key
     osClient.loggedIn = false
   }
@@ -625,8 +958,8 @@ function closeLanServer () {
 function openExternalPlayer (url) {
   const custom = state.prefs.externalPlayer === 'custom' && state.prefs.externalPlayerPath
   const notFound = custom
-    ? `Couldn't start ${path.basename(state.prefs.externalPlayerPath)}. Choose the player again in Preferences.`
-    : 'VLC wasn\'t found. Install it from videolan.org, or choose another player in Preferences.'
+    ? t("Couldn't start {app}. Choose the player again in Preferences.", { app: path.basename(state.prefs.externalPlayerPath) })
+    : t("VLC wasn't found. Install it from videolan.org, or choose another player in Preferences.")
   return new Promise((resolve, reject) => {
     let cmd, args
     if (custom) {
@@ -657,16 +990,25 @@ function applyLimits () {
   client.throttleUpload(bytes(state.prefs.uploadLimit))
 }
 
+function applyUploadPolicy () {
+  if (state.prefs.allowUploads) return // WebTorrent's regular rechoke unchokes peers within seconds
+  for (const tor of live.values()) for (const wire of tor.wires || []) wire.choke()
+}
+
 function applyTheme () {
   nativeTheme.themeSource = state.prefs.theme
 }
 
+function applyLanguage () {
+  setLanguage(resolveLanguage(state.prefs.language, app.getLocale()))
+}
+
 function applyLoginItem () {
   if (isLinux) {
-    const file = path.join(os.homedir(), '.config', 'autostart', 'onlytorrent.desktop')
+    const file = path.join(os.homedir(), '.config', 'autostart', 'magnetic.desktop')
     if (state.prefs.openAtLogin) {
       fs.mkdirSync(path.dirname(file), { recursive: true })
-      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=onlyTorrent\nExec="${process.execPath}" --hidden\nX-GNOME-Autostart-enabled=true\n`)
+      fs.writeFileSync(file, `[Desktop Entry]\nType=Application\nName=Magnetic\nExec="${process.execPath}" --hidden\nX-GNOME-Autostart-enabled=true\n`)
     } else fs.rmSync(file, { force: true })
     return
   }
@@ -684,7 +1026,7 @@ function createTray () {
   if (isMac || tray) return
   const icon = appIcon()
   tray = new Tray(icon.isEmpty() ? icon : icon.resize({ width: 22, height: 22 }))
-  tray.setToolTip('onlyTorrent')
+  tray.setToolTip('Magnetic')
   tray.on('click', showWindow)
   updateTray()
 }
@@ -696,14 +1038,14 @@ function updateTray () {
   const key = String(active)
   if (key === lastTrayKey) return
   lastTrayKey = key
-  tray.setToolTip(active ? `onlyTorrent: ${active} downloading` : 'onlyTorrent')
+  tray.setToolTip(active ? t('Magnetic: {n} downloading', { n: active }) : 'Magnetic')
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: 'Show onlyTorrent', click: showWindow },
+    { label: t('Show Magnetic'), click: showWindow },
     { type: 'separator' },
-    { label: 'Pause all', click: pauseAll },
-    { label: 'Resume all', click: resumeAll },
+    { label: t('Pause all'), click: pauseAll },
+    { label: t('Resume all'), click: resumeAll },
     { type: 'separator' },
-    { label: 'Quit', click: () => { app.isQuitting = true; app.quit() } }
+    { label: t('Quit'), click: () => { app.isQuitting = true; app.quit() } }
   ]))
 }
 
@@ -720,20 +1062,32 @@ function showWindow () {
 // ---------- IPC ----------
 function registerIpc () {
   const h = (ch, fn) => ipcMain.handle(ch, async (_e, ...args) => {
-    try { return { ok: true, value: await fn(...args) } } catch (err) { return { ok: false, error: err.message } }
+    // messages from lib/ are English; known ones are translated here (t() leaves the rest as is)
+    try { return { ok: true, value: await fn(...args) } } catch (err) { return { ok: false, error: t(err.message) } }
   })
 
   h('torrents:list', () => { pushTorrents(); return null })
+  h('app:language', () => getLanguage())
   h('torrent:add', id => addTorrent(id))
-  h('torrent:addPaths', paths => Promise.all(paths.map(p => addTorrent(p))))
+  h('discover:search', opts => searchArchive(opts, { userAgent: `Magnetic/${app.getVersion()}` }))
+  h('discover:openPage', url => {
+    if (!/^https:\/\/archive\.org\/details\/[^/?#]+$/.test(String(url))) throw new Error(t('That isn’t an Internet Archive page.'))
+    return shell.openExternal(url)
+  })
+  h('discover:add', url => {
+    // only archive.org torrents come through here; they get the duplicate-copy filter
+    if (!/^https:\/\/archive\.org\/download\/[^/]+\/[^/]+_archive\.torrent$/.test(String(url))) throw new Error(t('That isn’t an Internet Archive torrent.'))
+    return addTorrent(url, { pickBest: true })
+  })
+  h('torrent:addPaths', paths => addEach(paths))
   h('torrent:openDialog', async () => {
     const r = await dialog.showOpenDialog(win, {
-      title: 'Open torrent file',
+      title: t('Open torrent file'),
       properties: ['openFile', 'multiSelections'],
-      filters: [{ name: 'Torrent files', extensions: ['torrent'] }]
+      filters: [{ name: t('Torrent files'), extensions: ['torrent'] }]
     })
     if (r.canceled) return []
-    return Promise.all(r.filePaths.map(p => addTorrent(p)))
+    return addEach(r.filePaths)
   })
   h('torrent:pause', ih => pauseTorrent(ih))
   h('torrent:resume', ih => resumeTorrent(ih))
@@ -747,7 +1101,7 @@ function registerIpc () {
   })
   h('torrent:saveFile', async ih => {
     const entry = entryOf(ih)
-    if (!entry?.torrentFile) throw new Error('The .torrent file is available once metadata has downloaded.')
+    if (!entry?.torrentFile) throw new Error(t('The .torrent file is available once metadata has downloaded.'))
     const r = await dialog.showSaveDialog(win, { defaultPath: `${entry.name || ih}.torrent` })
     if (!r.canceled) fs.copyFileSync(entry.torrentFile, r.filePath)
     return !r.canceled
@@ -761,31 +1115,49 @@ function registerIpc () {
   })
   h('torrent:pickShare', async kind => {
     const r = await dialog.showOpenDialog(win, {
-      title: kind === 'folder' ? 'Choose a folder to share' : 'Choose a file to share',
+      title: kind === 'folder' ? t('Choose a folder to share') : t('Choose a file to share'),
       properties: [kind === 'folder' ? 'openDirectory' : 'openFile']
     })
     return r.canceled ? null : r.filePaths[0]
   })
   h('torrent:seedPath', async (p, opts) => {
-    if (!p || !fs.existsSync(p)) throw new Error('That file or folder no longer exists.')
+    if (!p || !fs.existsSync(p)) throw new Error(t('That file or folder no longer exists.'))
     const entry = await seedPath(p, opts)
     clipboard.writeText(entry.magnet)
     return { name: entry.name, magnet: entry.magnet }
   })
-  h('torrent:defaultTrackers', () => [
-    'udp://tracker.opentrackr.org:1337/announce',
-    'udp://open.stealth.si:80/announce',
-    'udp://exodus.desync.com:6969/announce',
-    'wss://tracker.openwebtorrent.com',
-    'wss://tracker.webtorrent.dev'
-  ])
-
+  h('torrent:defaultTrackers', () => state.prefs.trackers?.length ? state.prefs.trackers : DEFAULT_TRACKERS)
+  h('trackers:list', ih => trackerList(ih))
+  h('trackers:add', (ih, text) => addTrackersTo(ih, text))
+  h('trackers:remove', (ih, urls) => removeTrackersFrom(ih, urls))
+  h('trackers:removeDead', ih => removeDeadTrackers(ih))
+  h('trackers:defaults', () => DEFAULT_TRACKERS)
+  h('prefs:setTrackers', text => {
+    const { valid, invalid } = parseTrackerList(text)
+    state.prefs.trackers = valid
+    resyncAllTrackers()
+    saveState()
+    return { trackers: valid, invalid }
+  })
   h('media:stream', async (ih, index) => {
-    const t = await liveReady(ih)
-    const file = t.files[index]
-    if (!file) throw new Error('File not found in this torrent.')
+    const tor = await liveReady(ih)
+    const file = tor.files[index]
+    if (!file) throw new Error(t('File not found in this torrent.'))
     if (entryOf(ih).deselected.includes(index)) setFileSelected(ih, index, true)
     return { url: streamUrl(ih, index, file.name), name: file.name, kind: kindOf(file.name), mime: mimeOf(file.name) }
+  })
+  h('media:probe', async (ih, index) => {
+    await liveReady(ih)
+    if (!ffmpegPath()) return null
+    return probeFile(ih, index)
+  })
+  h('media:converted', async (ih, index, start = 0, audio = 0) => {
+    const tor = await liveReady(ih)
+    const file = tor.files[index]
+    if (!file) throw new Error(t('File not found in this torrent.'))
+    // ask ffmpeg which keyframe it will start from, so the player's clock matches
+    const offset = await findKeyframe(ffmpegPath(), streamUrl(ih, index, file.name), start).catch(() => start)
+    return { url: `http://127.0.0.1:${localPort}/${TOKEN}/tx/${ih}/${index}?start=${offset > 0 ? start : 0}&audio=${audio}`, offset }
   })
   h('media:strip', (ih, index, buckets) => {
     const t = live.get(ih)
@@ -801,16 +1173,16 @@ function registerIpc () {
   })
   h('media:subtitleFromDisk', async () => {
     const r = await dialog.showOpenDialog(win, {
-      title: 'Add subtitles',
+      title: t('Add subtitles'),
       properties: ['openFile'],
-      filters: [{ name: 'Subtitles', extensions: ['srt', 'vtt', 'ass', 'ssa'] }]
+      filters: [{ name: t('Subtitles'), extensions: ['srt', 'vtt', 'ass', 'ssa'] }]
     })
     if (r.canceled) return null
     const p = r.filePaths[0]
     return { name: path.basename(p), path: p, ...decodeNamed(fs.readFileSync(p), p, 'auto') }
   })
   h('media:subtitleFile', (p, encoding = 'auto') => {
-    if (!/\.(srt|vtt|ass|ssa)$/i.test(p) || !fs.existsSync(p)) throw new Error('That subtitle file is no longer there.')
+    if (!/\.(srt|vtt|ass|ssa)$/i.test(p) || !fs.existsSync(p)) throw new Error(t('That subtitle file is no longer there.'))
     return { name: path.basename(p), path: p, ...decodeNamed(fs.readFileSync(p), p, encoding) }
   })
   h('media:embeddedStart', async (ih, index) => {
@@ -856,7 +1228,7 @@ function registerIpc () {
     const existing = fs.readdirSync(dir).find(f => f.startsWith(`${fileId}-`))
     if (existing) return { path: path.join(dir, existing), remaining: null }
     const client = await openSubtitles()
-    if (!client.loggedIn) throw new Error('Downloading needs your OpenSubtitles username and password. Add them in Preferences.')
+    if (!client.loggedIn) throw new Error(t('Downloading needs your OpenSubtitles username and password. Add them in Preferences.'))
     const item = await client.download(fileId)
     const safe = path.basename(item.name).replace(/[^\w.\- ]+/g, '_').slice(0, 120) || 'subtitles.srt'
     const file = path.join(dir, `${fileId}-${/\.(srt|vtt|ass|ssa)$/i.test(safe) ? safe : safe + '.srt'}`)
@@ -875,7 +1247,7 @@ function registerIpc () {
     if (password !== undefined) {
       if (!password) state.prefs.osPassword = ''
       else if (safeStorage.isEncryptionAvailable()) state.prefs.osPassword = safeStorage.encryptString(password).toString('base64')
-      else throw new Error('This system can’t store the password securely, so it wasn’t saved.')
+      else throw new Error(t('This system can’t store the password securely, so it wasn’t saved.'))
     }
     osClient = null
     saveState()
@@ -919,6 +1291,10 @@ function registerIpc () {
     if (height > area.height - 40) { height = area.height - 40; width = Math.round(height * ratio) }
     win.setContentSize(width, height, true)
   })
+  h('player:watching', ih => {
+    watching = ih && entryOf(ih) ? ih : null
+    schedule()
+  })
   h('player:playing', playing => {
     if (playing && powerBlockId == null) powerBlockId = powerSaveBlocker.start('prevent-display-sleep')
     if (!playing && powerBlockId != null) { powerSaveBlocker.stop(powerBlockId); powerBlockId = null }
@@ -926,10 +1302,10 @@ function registerIpc () {
 
   h('cast:list', () => caster.list())
   h('cast:play', async (deviceId, ih, index, startTime, subtitleVtt) => {
-    const t = await liveReady(ih)
-    const file = t.files[index]
+    const tor = await liveReady(ih)
+    const file = tor.files[index]
     const host = lanAddress()
-    if (!host) throw new Error('Connect to a Wi-Fi or wired network to cast.')
+    if (!host) throw new Error(t('Connect to a Wi-Fi or wired network to cast.'))
     await ensureLanServer()
     castSubs.clear()
     let subtitlesUrl = null
@@ -947,11 +1323,16 @@ function registerIpc () {
   h('cast:stop', async () => { await caster.stop(); closeLanServer() })
 
   h('prefs:get', () => state.prefs)
+  h('disk:free', dir => freeBytes(dir || state.prefs.downloadPath))
   h('prefs:set', patch => {
     Object.assign(state.prefs, patch)
     if ('downloadLimit' in patch || 'uploadLimit' in patch) applyLimits()
     if ('theme' in patch) applyTheme()
+    if ('language' in patch) { applyLanguage(); buildMenu(); lastTrayKey = ''; updateTray() } // the renderer reloads itself
     if ('openAtLogin' in patch) applyLoginItem()
+    if ('trackersForDownloads' in patch) resyncAllTrackers()
+    if ('allowUploads' in patch) applyUploadPolicy()
+    if ('maxActiveDownloads' in patch || 'pauseOthersWhileWatching' in patch || 'allowUploads' in patch) schedule()
     saveState()
     return state.prefs
   })
@@ -964,10 +1345,10 @@ function registerIpc () {
   })
   h('prefs:chooseExternalPlayer', async () => {
     const r = await dialog.showOpenDialog(win, {
-      title: 'Choose a video player',
+      title: t('Choose a video player'),
       defaultPath: isMac ? '/Applications' : undefined,
       properties: ['openFile'],
-      filters: isMac ? [{ name: 'Applications', extensions: ['app'] }] : isWin ? [{ name: 'Programs', extensions: ['exe'] }] : []
+      filters: isMac ? [{ name: t('Applications'), extensions: ['app'] }] : isWin ? [{ name: t('Programs'), extensions: ['exe'] }] : []
     })
     if (r.canceled) return state.prefs
     Object.assign(state.prefs, { externalPlayer: 'custom', externalPlayerPath: r.filePaths[0] })
@@ -978,7 +1359,7 @@ function registerIpc () {
     const ok = process.defaultApp
       ? app.setAsDefaultProtocolClient('magnet', process.execPath, [path.resolve(process.argv[1])])
       : app.setAsDefaultProtocolClient('magnet')
-    if (!ok) throw new Error('The system didn\'t allow changing the magnet link handler.')
+    if (!ok) throw new Error(t("The system didn't allow changing the magnet link handler."))
     return true
   })
   h('prefs:isDefaultHandler', () => app.isDefaultProtocolClient('magnet'))
@@ -990,26 +1371,43 @@ function registerIpc () {
 function sendMenu (action) { showWindow(); win?.webContents.send('menu', action) }
 
 function buildMenu () {
+  // role items get explicit labels: Electron's own role labels are English only
+  const quit = { label: isMac ? t('Quit Magnetic') : t('Quit'), accelerator: isMac ? 'Cmd+Q' : 'Ctrl+Q', click: () => { app.isQuitting = true; app.quit() } }
   const template = [
-    ...(isMac ? [{ role: 'appMenu', submenu: [{ role: 'about' }, { label: 'Check for updates…', click: () => checkForUpdates(true) }, { type: 'separator' }, { label: 'Preferences…', accelerator: 'Cmd+,', click: () => sendMenu('prefs') }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] }] : []),
+    ...(isMac ? [{ role: 'appMenu', submenu: [{ role: 'about', label: t('About Magnetic') }, { label: t('Check for updates…'), click: () => checkForUpdates(true) }, { type: 'separator' }, { label: t('Preferences…'), accelerator: 'Cmd+,', click: () => sendMenu('prefs') }, { type: 'separator' }, { role: 'hide', label: t('Hide Magnetic') }, { role: 'hideOthers', label: t('Hide Others') }, { role: 'unhide', label: t('Show All') }, { type: 'separator' }, { ...quit, role: 'quit' }] }] : []),
     {
-      label: 'File',
+      label: t('File'),
       submenu: [
-        { label: 'Add magnet link…', accelerator: 'CmdOrCtrl+U', click: () => sendMenu('add-magnet') },
-        { label: 'Open torrent file…', accelerator: 'CmdOrCtrl+O', click: () => sendMenu('open-torrent') },
+        { label: t('Add magnet link…'), accelerator: 'CmdOrCtrl+U', click: () => sendMenu('add-magnet') },
+        { label: t('Open torrent file…'), accelerator: 'CmdOrCtrl+O', click: () => sendMenu('open-torrent') },
         { type: 'separator' },
-        { label: 'Share files as a torrent…', accelerator: 'CmdOrCtrl+N', click: () => sendMenu('share') },
+        { label: t('Share files as a torrent…'), accelerator: 'CmdOrCtrl+N', click: () => sendMenu('share') },
         { type: 'separator' },
-        { label: 'Pause all', click: pauseAll },
-        { label: 'Resume all', click: resumeAll },
+        { label: t('Pause all'), click: pauseAll },
+        { label: t('Resume all'), click: resumeAll },
         ...(isMac
-          ? [{ type: 'separator' }, { role: 'close' }]
-          : [{ type: 'separator' }, { label: 'Preferences', accelerator: 'Ctrl+,', click: () => sendMenu('prefs') }, { label: 'Check for updates…', click: () => checkForUpdates(true) }, { type: 'separator' }, { label: 'Quit', accelerator: 'Ctrl+Q', click: () => { app.isQuitting = true; app.quit() } }])
+          ? [{ type: 'separator' }, { role: 'close', label: t('Close Window') }]
+          : [{ type: 'separator' }, { label: t('Preferences'), accelerator: 'Ctrl+,', click: () => sendMenu('prefs') }, { label: t('Check for updates…'), click: () => checkForUpdates(true) }, { type: 'separator' }, quit])
       ]
     },
-    { role: 'editMenu' },
-    { label: 'View', submenu: [{ label: 'Find torrent', accelerator: 'CmdOrCtrl+F', click: () => sendMenu('search') }, { type: 'separator' }, { role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
-    { role: 'windowMenu' }
+    {
+      label: t('Edit'),
+      submenu: [
+        { role: 'undo', label: t('Undo') }, { role: 'redo', label: t('Redo') }, { type: 'separator' },
+        { role: 'cut', label: t('Cut') }, { role: 'copy', label: t('Copy') }, { role: 'paste', label: t('Paste') },
+        ...(isMac ? [{ role: 'pasteAndMatchStyle', label: t('Paste and Match Style') }] : []),
+        { role: 'delete', label: t('Delete') }, { role: 'selectAll', label: t('Select All') }
+      ]
+    },
+    { label: t('View'), submenu: [{ label: t('Find torrent'), accelerator: 'CmdOrCtrl+F', click: () => sendMenu('search') }, { type: 'separator' }, { role: 'reload', label: t('Reload') }, { role: 'toggleDevTools', label: t('Toggle Developer Tools') }, { type: 'separator' }, { role: 'togglefullscreen', label: t('Toggle Full Screen') }] },
+    {
+      role: 'windowMenu',
+      label: t('Window'),
+      submenu: [
+        { role: 'minimize', label: t('Minimize') },
+        ...(isMac ? [{ role: 'zoom', label: t('Zoom') }, { type: 'separator' }, { role: 'front', label: t('Bring All to Front') }] : [{ role: 'close', label: t('Close') }])
+      ]
+    }
   ]
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
@@ -1023,7 +1421,7 @@ function createWindow () {
     show: !process.argv.includes('--hidden'),
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#141414' : '#FAFAFA',
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
-    title: 'onlyTorrent',
+    title: 'Magnetic',
     icon: isLinux ? appIcon() : undefined,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -1043,12 +1441,12 @@ function createWindow () {
 let updaterWired = false
 async function checkForUpdates (manual = false) {
   if (!app.isPackaged) {
-    if (manual) dialog.showMessageBox({ message: 'Updates are checked only in the installed app.' })
+    if (manual) dialog.showMessageBox({ message: t('Updates are checked only in the installed app.') })
     return
   }
   // electron-builder writes this file only when a publish target is configured
   if (!fs.existsSync(path.join(process.resourcesPath, 'app-update.yml'))) {
-    if (manual) dialog.showMessageBox({ message: 'Automatic updates aren\'t set up for this build.' })
+    if (manual) dialog.showMessageBox({ message: t("Automatic updates aren't set up for this build.") })
     return
   }
   try {
@@ -1057,14 +1455,14 @@ async function checkForUpdates (manual = false) {
     if (!updaterWired) {
       updaterWired = true
       autoUpdater.on('update-downloaded', info => {
-        toast(`Version ${info.version} is ready. It installs when you quit onlyTorrent.`)
+        toast(t('Version {version} is ready. It installs when you quit Magnetic.', { version: info.version }))
       })
     }
     const result = await autoUpdater.checkForUpdates()
-    if (manual && !result?.isUpdateAvailable) dialog.showMessageBox({ message: `You have the latest version (${app.getVersion()}).` })
+    if (manual && !result?.isUpdateAvailable) dialog.showMessageBox({ message: t('You have the latest version ({version}).', { version: app.getVersion() }) })
   } catch (err) {
     // no publish settings yet, offline, or the app isn't signed: updates simply stay off
-    if (manual) dialog.showMessageBox({ type: 'warning', message: 'Couldn\'t check for updates.', detail: err.message })
+    if (manual) dialog.showMessageBox({ type: 'warning', message: t("Couldn't check for updates."), detail: err.message })
   }
 }
 
@@ -1078,12 +1476,34 @@ async function enableWebRtc () {
   }
 }
 
+// The app was called onlyTorrent before it became Magnetic. Electron names the data
+// folder after the app, so copy the old one across once (and leave it in place).
+function migrateOldData () {
+  const appData = app.getPath('appData')
+  const current = app.getPath('userData')
+  if (current !== path.join(appData, app.getName())) return // a test or custom profile
+  const old = path.join(appData, 'onlyTorrent')
+  if (old === current || fs.existsSync(path.join(current, 'state.json')) || !fs.existsSync(path.join(old, 'state.json'))) return
+  try {
+    fs.cpSync(old, current, { recursive: true, errorOnExist: false })
+    const statePath = path.join(current, 'state.json')
+    // saved .torrent copies are referenced by absolute path
+    fs.writeFileSync(statePath, fs.readFileSync(statePath, 'utf8').split(JSON.stringify(old).slice(1, -1)).join(JSON.stringify(current).slice(1, -1)))
+  } catch (err) {
+    console.error('Couldn’t copy settings from onlyTorrent:', err.message)
+  }
+}
+
+app.on('will-quit', () => { for (const ff of converting) ff.kill('SIGKILL') })
+
 app.whenReady().then(async () => {
+  migrateOldData()
   STATE_FILE = path.join(app.getPath('userData'), 'state.json')
   TORRENT_DIR = path.join(app.getPath('userData'), 'torrents')
   POSTER_DIR = path.join(app.getPath('userData'), 'posters')
   loadState()
   applyTheme()
+  applyLanguage()
 
   await enableWebRtc()
   client = new WebTorrent()
@@ -1099,7 +1519,7 @@ app.whenReady().then(async () => {
   createTray()
   if (state.prefs.openAtLogin) applyLoginItem() // only touch the system setting when the user opted in
 
-  for (const entry of state.torrents) if (!entry.paused) startTorrent(entry)
+  schedule()
   ready = true
   pendingOpen.splice(0).forEach(openExternalId)
 

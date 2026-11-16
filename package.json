@@ -1,5 +1,5 @@
 {
-  "name": "onlytorrent",
+  "name": "magnetic",
   "version": "0.1.0",
   "description": "Stream torrent videos from magnet links with seeking while downloading",
   "type": "module",
@@ -15,10 +15,12 @@
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.3.0",
     "airplayer": "^2.0.0",
+    "bittorrent-tracker": "^11.2.3",
     "chardet": "^2.2.0",
     "chromecasts": "^1.10.2",
     "dlnacasts": "^0.1.0",
     "electron-updater": "^6.8.11",
+    "ffmpeg-static": "^5.2.0",
     "iconv-lite": "^0.7.3",
     "matroska-subtitles": "^3.3.2",
     "music-metadata": "^12.4.0",
@@ -30,10 +32,10 @@
     "electron": "^45.2.3",
     "electron-builder": "^26.18.0"
   },
-  "productName": "onlyTorrent",
+  "productName": "Magnetic",
   "build": {
-    "appId": "app.onlytorrent.desktop",
-    "productName": "onlyTorrent",
+    "appId": "app.magnetic.desktop",
+    "productName": "Magnetic",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -48,7 +50,8 @@
       "node_modules/**/*"
     ],
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "node_modules/ffmpeg-static/**"
     ],
     "protocols": [
       {
@@ -71,7 +74,8 @@
       "target": [
         "dmg",
         "zip"
-      ]
+      ],
+      "identity": null
     },
     "win": {
       "target": [
@@ -93,6 +97,8 @@
         "application/x-bittorrent"
       ]
     },
-    "npmRebuild": false
+    "npmRebuild": false,
+    "afterAllArtifactBuild": "scripts/dmg-icon.cjs",
+    "afterPack": "scripts/adhoc-sign.cjs"
   }
 }

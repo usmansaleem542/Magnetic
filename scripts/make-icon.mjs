@@ -1,4 +1,4 @@
-// Renders the onlyTorrent app icon to build/icon.png (1024px).
+// Renders the Magnetic app icon to build/icon.png (1024px).
 // The mark is a play button built from download pieces, two of them still arriving,
 // which is the app in one picture: you can press play before the download is done.
 // Run: node scripts/make-icon.mjs

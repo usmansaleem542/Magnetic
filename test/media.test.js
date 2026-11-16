@@ -73,3 +73,10 @@ test('displayName tidies raw Chromecast service names and leaves others alone', 
   assert.equal(displayName('Living Room TV', 'chromecast'), 'Living Room TV')
   assert.equal(displayName('Kitchen-Speaker', 'airplay'), 'Kitchen-Speaker')
 })
+
+test('bytesNeeded: only ticked files, minus what is already downloaded', async () => {
+  const { bytesNeeded } = await import('../lib/media.js')
+  const files = [{ length: 1000, progress: 0 }, { length: 500, progress: 0.5 }, { length: 9000, progress: 0 }]
+  assert.equal(bytesNeeded(files, [2]), 1250)
+  assert.equal(bytesNeeded(files), 10250)
+})

@@ -1,4 +1,4 @@
-// The onlyTorrent mark: a play button made of download pieces, one still arriving.
+// The Magnetic mark: a play button made of download pieces, one still arriving.
 // [row, column, state]: 1 = downloaded, 0.5 = still arriving. Shared by the app icon and the title bar.
 // Rows of 1, 3, 4, 3, 1 pieces give a play triangle's proportions; the missing piece sits
 // inside the shape so the outline stays crisp at small sizes.
